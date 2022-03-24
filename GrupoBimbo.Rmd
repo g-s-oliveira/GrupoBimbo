@@ -1,0 +1,1517 @@
+---
+title: "Grupo Bimbo"
+author: "Gonçalo Oliveira"
+date: "03/03/2022"
+output: html_document
+smart: false
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+# 1 - Understand Context
+
+Planning a celebration is a balancing act of preparing just enough food to go around without being stuck eating the same leftovers for the next week. The key is anticipating how many guests will come. Grupo Bimbo must weigh similar considerations as it strives to meet daily consumer demand for fresh bakery products on the shelves of over 1 million stores along its 45,000 routes across Mexico.
+
+Currently, daily inventory calculations are performed by direct delivery sales employees who must single-handedly predict the forces of supply, demand, and hunger based on their personal experiences with each store. With some breads carrying a one week shelf life, the acceptable margin for error is small.
+
+Grupo Bimbo invites developers to build a model to accurately forecast inventory demand based on historical sales data. Doing so will make sure consumers of its over 100 bakery products aren’t staring at empty shelves, while also reducing the amount spent on refunds to store owners with surplus product unfit for sale.
+
+[Grupo Bimbo Kaggle Website](https://www.kaggle.com/c/grupo-bimbo-inventory-demand/overview)
+
+**Objective**: forecast the demand of a product for a given week, at a particular store. 
+
+```{r include=FALSE}
+setwd("D:/FCD/01BigDataAzure/Projeto2")
+getwd()
+```
+
+```{r}
+library(knitr)
+knitr::opts_chunk$set(cache = FALSE, warning = FALSE, 
+                      message = FALSE, cache.lazy = FALSE)
+```
+
+
+```{r ,  message = FALSE, warning= FALSE}
+# Imports
+library(tidyverse)
+library(stringr)
+library(rmarkdown)
+library(gridExtra)
+
+# Model selection
+library(xgboost)
+library(mlr)
+library(Metrics)
+library(lightgbm)
+library(caret)
+library(parallel)
+
+```
+
+# 2 - Collect Data
+
+The data to train the model consists of 5 different csv files listed below:
+
+Data variables:
+
+* **train.csv** — the training set
+* **test.csv** — the test set
+* **sample_submission.csv** — a sample submission file in the correct format
+* **cliente_tabla.csv** — client names (can be joined with train/test on Cliente_ID)
+* **producto_tabla.csv** — product names (can be joined with train/test on Producto_ID)
+* **town_state.csv** — town and state (can be joined with train/test on Agencia_ID)
+
+The dataset given consists of 9 weeks of sales transactions in Mexico. Every week, there are delivery trucks that deliver products to the vendors. Each transaction consists of sales and returns. Returns are the products that are unsold and expired. The demand for a product in a certain week is defined as the sales this week subtracted by the return next week.
+
+# 3 - Data Exploration
+## 3.1 - Client dataset
+
+The first dataset that will be analysed if the client data.
+
+```{r , message=FALSE}
+df_client <- read_csv('data/cliente_tabla.csv')
+paged_table(df_client, options = list(row.print = 5))
+```
+
+There are duplicates values for Client_ID, which is a result of small typing differences. It can also be seen that some
+**Cliente_ID** doesn't have a name. Lets consider only the Client_ID number instead of name.
+
+```{r}
+n_distinct(df_client$Cliente_ID)
+```
+
+There are 930500 different clients considering the **Cliente_ID**.
+
+## 3.2 - Town dataset
+
+The town dataset contains relevant information related to the agency location. This data will allow us to make analysis based on Town and State and evaluate if those variables may impact the demand prediction.
+
+```{r Import client data, message = FALSE}
+df_town <- read_csv('data/town_state.csv')
+paged_table(df_town, options = list(row.print = 5))
+```
+The df_towm presents an Agencia_ID, Town and State. 
+
+
+```{r, }
+sapply(df_town, function(x) n_distinct(x))
+```
+There are 790 different sales dept, 260 towns and 33 States. The following figures will present
+the number of towns per state, the number of agencies per state and the correlation
+between the number of towns and agencies in each state.
+
+```{r Town plots, fig.height = 8, fig.width = 12, fig.align = "center"}
+df <- df_town %>%
+  group_by(State) %>%
+  summarise(n_towns = n_distinct(Town),
+            n_agencia = n_distinct(Agencia_ID)) 
+
+plot1 <- ggplot(df) +
+geom_bar(aes(x = reorder(State, n_towns), y = n_towns, fill = n_towns), stat = 'identity', alpha = 0.8) + 
+coord_flip() + 
+labs(title = 'number of towns per state',
+     y = '# towns') +
+theme_classic(base_size = 16) +
+theme(legend.position = "none",
+        axis.title.x = element_text(color = "#555655"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text( color = "#929497"),
+        axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+        axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"))
+
+plot2 <- ggplot(df) +
+geom_bar(aes(x = reorder(State, n_agencia), y = n_agencia, fill = n_agencia), stat = 'identity', alpha = 0.8) + 
+coord_flip() + 
+labs(title = 'number of agencies per state',
+     y = '# agencies') +
+theme_classic(base_size = 16) +
+theme(legend.position = "none",
+        axis.title.x = element_text(color = "#555655"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+        axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"))
+
+grid.arrange(plot1, plot2, nrow = 1)
+
+
+
+
+
+```
+
+
+```{r, fig.height = 5, fig.width = 7, fig.align = "center"}
+ggplot(df) + 
+  geom_point(aes(x = n_towns, y = n_agencia), color = '#174A7E', size = 3, alpha = 0.6) +
+  labs(x = '# towns',
+       y = '# agencies') +
+  theme_classic(base_size = 16) +
+  theme(legend.position = "none",
+        axis.title.x = element_text(color = "#555655"),
+        axis.title.y = element_text(color = "#555655"),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+        axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"))
+```
+
+
+
+```{r, fig.height = 5, fig.width = 8, fig.align = "center"}
+df %>%
+  mutate(ratio = n_agencia/n_towns) %>%
+  ggplot() +
+  geom_histogram(aes(x = ratio), bins = 15, fill = '#174A7E', alpha = 0.7) +
+  labs(x = '# agencies per town') +
+  theme_classic(base_size = 16) +
+  theme(legend.position = "none",
+        axis.title.x = element_text(color = "#555655"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+        axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"))
+
+```
+
+It can be seen that *Estado de Mexico* and *Mexico, D.F* are the two main States with 
+71 and 65 sales depot, respectively. It is possible to see a strong positive correlation between the
+number of towns and the number of sales depot. There is a mean of 3, minimum of 1 and maximum of 6 of sales depot per town.
+
+## 3.3 - Product dataset
+
+The product dataset contain all the product sold by Grupo Bimbo. The data is unstructured and in order to get valuable information regular expressions should be used.
+
+```{r, message = FALSE}
+df_product <- read_csv('data/producto_tabla.csv')
+
+paged_table(df_product, options = list(row.print = 5))
+```
+
+The product dataset contains two columns, one with a Product_ID and NombreProducto.
+The NombreProducto contains many information that is not treated and clean as:
+
+* product name;
+* amount( weight, volume, pieces);
+* brand.
+
+We will need to use regular expressions to split the second column string into each 
+valuable information. The following code builds a function to receive the dataset.
+
+```{r}
+
+preprocess_product <- function(data){
+  tmp <- str_extract(data$NombreProducto, "[[:digit:]]+(g|G|kg|Kg)")
+  
+  # Weight
+  data$weight <- as.integer(str_extract(tmp, "[[:digit:]]+"))
+  data$units <- tolower(str_extract(tmp, "[[:alpha:]]+"))
+  data$weight <- ifelse(data$units == 'kg', data$weight*1000, data$weight)
+  data <- select(data, -units)
+  
+  # Pieces
+  tmp <- str_extract(data$NombreProducto, "[[:digit:]]+p\\s")
+  data$pieces <- as.integer(str_extract(tmp, "[[:digit:]]+"))
+  
+  # Volume
+  tmp <- str_extract(data$NombreProducto, "[[:digit:]]+(ml|ML)")
+  data$volume <- as.integer(str_extract(tmp, "[[:digit:]]+"))
+  
+  # Brand Name
+  tmp <- str_split(data$NombreProducto, "\\s")
+  data$brand <- sapply(tmp, function(x) x[length(x)-1])
+  
+  # Name
+  tmp <- str_split(data$NombreProducto, "\\s[[:digit:]]+")
+  data$product_name <- sapply(tmp, function(x) x[1])
+  
+  data <- data %>% select(-NombreProducto)
+  
+  data <- data %>% select(Producto_ID, product_name, brand, weight, pieces, volume)
+  
+}
+
+```
+
+
+```{r}
+df_product2 <- preprocess_product(df_product)
+paged_table(df_product2, options = list(row.print = 5))
+```
+
+The median products weight is around 180 grams, whilhe the median pieces per product is 8 as stated in figure below.
+
+
+```{r , warning=FALSE, fig.height = 8, fig.width = 12, fig.align = "center"}
+p1 <- ggplot(df_product2)+
+  geom_boxplot(aes(x = weight), color = '#174A7E', size = 1) +
+  scale_x_log10() +
+  labs(x = 'weight') +
+  theme_classic(base_size = 20) +
+  theme(legend.position = "none",
+        axis.title.x = element_text(color = "#555655"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+        axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"))
+
+p2 <-ggplot(df_product2) +
+  geom_boxplot(aes(pieces), color = '#174A7E', size = 1) + 
+  scale_x_log10() +
+  labs(x = 'pieces') +
+  theme_classic(base_size = 20) +
+  theme(legend.position = "none",
+        axis.title.x = element_text(color = "#555655"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+        axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"))
+
+grid.arrange(p1, p2, nrow =2)
+```
+
+
+Lets take a look on the number of distinct brands from overall products list.
+
+```{r}
+n_distinct(df_product2$brand)
+```
+
+There are 45 different brands. Next we will analyse the number of products that each brand has. It can be seen that more than 50% have less that 4 product. The main brand are **BIM** and **MLA** with 679 and 657 products, respectively.
+It is also noted than median and mean that quite different due to the outliers wich sell a hundreds of products.
+
+
+```{r}
+df_product2 %>%
+  group_by(brand) %>%
+  summarise(n = n()) %>%
+  summary()
+
+```
+
+
+
+```{r}
+paged_table(df_product2 %>%
+  group_by(brand) %>%
+  summarise(n = n()) %>%
+  arrange(desc(n)))
+```
+
+BIM and MLA represent the main brands from the products with 679 and 659 products, respectively.
+ 
+ 
+## 3.4 - Demand dataset
+ 
+ The final dataset is the train dataset which contains all the history demand which will be used to train the model.
+ 
+```{r, message = FALSE}
+df_demand <- read_csv('data/train.csv')
+paged_table(df_demand)
+```
+
+The dataset comprises the following columns:
+
+* **Semana** — Week number (From Thursday to Wednesday)
+* **Agencia_ID** — Sales Depot ID
+* **Canal_ID** — Sales Channel ID
+* **Ruta_SAK** — Route ID (Several routes = Sales Depot)
+* **Cliente_ID** — Client ID
+* **NombreCliente** — Client name
+* **Producto_ID** — Product ID
+* **NombreProducto** — Product Name
+* **Venta_uni_hoy** — Sales unit this week (integer)
+* **Venta_hoy** — Sales this week (unit: pesos)
+* **Dev_uni_proxima** — Returns unit next week (integer)
+* **Dev_proxima** — Returns next week (unit: pesos)
+* **Demanda_uni_equil** — Adjusted Demand (integer) (This is the target you will predict)
+
+```{r}
+# Range of weeks
+min(df_demand$Semana)
+max(df_demand$Semana)
+
+```
+
+We have 7 weeks of sells and devolution records that goes from week 3 to 9.
+
+
+```{r}
+# Join table with Client Location
+demand2 <- left_join(df_demand, df_town, by = 'Agencia_ID')
+
+```
+
+Lets take a look we lost any row with the join.
+```{r}
+nrow(demand2) == nrow(df_demand) # No line were lost?
+rm(df_demand)
+```
+
+Lets see if there is any NA value in the dataset.
+```{r}
+sapply(demand2, function(x) sum(is.na(x))) # No Na values
+```
+
+```{r}
+# Convert to categorical variables to factor
+demand3 <-
+  demand2 %>%
+  mutate(Agencia_ID = as_factor(Agencia_ID),
+         Canal_ID = as_factor(Canal_ID),
+         Ruta_SAK = as_factor(Ruta_SAK),
+         Cliente_ID = as_factor(Cliente_ID),
+         Producto_ID = as_factor(Producto_ID),
+         Town = as_factor(Town),
+         State = as_factor(State))
+
+demand3 <- demand3 %>%
+  mutate(has_devo = as_factor(ifelse(Dev_uni_proxima > 0, 1, 0)))
+
+rm(demand2)
+```
+
+
+Lets see the percentage of demands that have devolution. Approximately 3.5% of the sales have a devolution.
+
+```{r}
+prop.table(table(demand3$has_devo))*100
+```
+
+Lets take a look on average week demands, sells and devolution.
+```{r, fig.height = 8, fig.width = 12, fig.align = "center"}
+df <- demand3 %>%
+  group_by(Semana) %>% summarise(orders = n(),
+                                 sent = sum(Venta_uni_hoy),
+                                 devo = sum(Dev_uni_proxima),
+                                 demand = sum(Demanda_uni_equil))
+plot1 <-  df %>%
+  ggplot() +
+  geom_line(aes(x = Semana, y = sent), color = 'blue') +
+  geom_line(aes(x = Semana, y = demand), color = 'red') + 
+  labs(title = 'Sells and demand per week') +
+  theme_classic(base_size = 16) +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+        axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"))
+
+plot2 <- df %>%
+  ggplot() +
+  geom_line(aes(x = Semana, y = devo), color = 'green') + 
+  labs(title = 'Devolution per week',
+    x = 'Weeks') +
+  theme_classic(base_size = 16) +
+  theme(legend.position = "none",
+        axis.title.x = element_text(color = "#555655"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line(size = 0.5, color = "#BFBEBE"),
+        axis.ticks.y = element_line(size = 0.5, color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"))
+
+
+grid.arrange(plot1, plot2, nrow=2)
+```
+It is possible to see that the demand for the products in each week as a decreasing tendency and the devolution are increasing. It would be good to have and extended range of data in order to capture the pattern and understand why this is happening.
+
+Lets group the data by week and number of requests per client and evaluate the mean number of resquest per client.
+
+```{r, message =FALSE}
+week_client <- demand3 %>%
+  group_by(Cliente_ID, Semana) %>%
+  summarise(n_prod = n_distinct(Producto_ID),
+            demand = sum(Demanda_uni_equil))
+
+paged_table(week_client)
+
+```
+
+```{r, fig.height = 8, fig.width = 12, fig.align = "center"}
+ggplot(data = week_client) +
+  geom_boxplot(aes(n_prod), color = '#174A7E') +
+  facet_wrap(~Semana, nrow = 3)+ 
+  labs(title = 'Different product request per week',
+    x = '# Products') +
+  theme_classic(base_size = 18) +
+  theme(legend.position = "none",
+        axis.title.x = element_text(color = "#555655"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line( color = "#BFBEBE"),
+        axis.ticks.y = element_line( color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"),
+        strip.background = element_blank())
+```
+
+It can be seen there are several outliers in the number of distinct products sold by the same client per week. We will calculate the median due to the outliers. Normally 75 % of the clients make below 25 requests per week,
+however there are many outliers that can reach almost 200 different products per week.
+
+```{r}
+week_client %>% group_by(Semana) %>% summarise(min_prod = min(n_prod),
+                                               median_prod = median(n_prod),
+                                               max_prod = max(n_prod))
+```
+
+There are stores with different sizes and products in the dataset. Some stores only sell 1 product, while other can go to almost 200 products in the same store. The 'average' behaviour is to sell 10 products per client. Lets also evaluate the number of sells per client at each week.
+
+```{r, fig.height = 8, fig.width = 12, fig.align = "center"}
+ggplot(data = week_client) +
+  geom_boxplot(aes(demand), color = '#174A7E') +
+  facet_wrap(~Semana, nrow = 3) +
+  labs(title = 'Average demand per week',
+    x = 'Demand') +
+  theme_classic(base_size = 18) +
+  theme(legend.position = "none",
+        axis.title.x = element_text(color = "#555655"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line( color = "#BFBEBE"),
+        axis.ticks.y = element_line( color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"),
+        strip.background = element_blank())
+```
+
+```{r}
+week_client %>% arrange(desc(demand))
+```
+
+It is possible to see that there is an outlier on demand. The outlier is from client 653378. Lets take a closer look on that specific client.
+
+```{r, message = FALSE, fig.height = 8, fig.width = 12, fig.align = "center"}
+client653378 <- demand3 %>% filter(Cliente_ID == 653378)
+
+client653378 %>% 
+  group_by(Producto_ID, Semana) %>% 
+  summarise(demand_sum = sum(Demanda_uni_equil)) %>%
+  ggplot() + 
+  geom_boxplot(aes(demand_sum), color = '#174A7E') + 
+  facet_wrap(~Semana, nrow = 3)+
+  labs(title = 'Average demand per week',
+         subtitle = 'Client 653378',
+    x = 'Demand') +
+  theme_classic(base_size = 18) +
+  theme(legend.position = "none",
+        axis.title.x = element_text(color = "#555655"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line( color = "#BFBEBE"),
+        axis.ticks.y = element_line( color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"),
+        strip.background = element_blank())
+```
+Client 653378 has different demands based on product. These means than the average number might not be representative for every client product demand. Lets also take a look on the variance of demand within the same product. We will see product 5200 specifically.
+
+```{r, message = FALSE, fig.height = 8, fig.width = 12, fig.align = "center"}
+demand3 %>% 
+  filter(Producto_ID == 5200) %>%
+  filter(Demanda_uni_equil != 0) %>%
+  group_by(Semana) %>%
+  ggplot() +
+  geom_boxplot(aes(Demanda_uni_equil), color = '#174A7E') +
+  facet_wrap(~Semana, nrow = 3) +
+  labs(title = 'Average demand per week',
+       subtitle = 'Product 5200',
+    x = 'Demand') +
+  theme_classic(base_size = 18) +
+  theme(legend.position = "none",
+        axis.title.x = element_text(color = "#555655"),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line( color = "#BFBEBE"),
+        axis.ticks.y = element_line( color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"),
+        strip.background = element_blank())
+```
+
+
+The previous 2 figures show that the client and product have an impact the demand. This is important for the feature engineering where we will build variables considering groups by **Client**, **Product** and **Product&Client** in order to be used on predictive model.
+
+
+By seeing the percentage distribution of requests per state it can be seen that 3 states sum more than 30% of the total sales,
+being the most important Estado de México, México, D.F and Jalisco.
+
+```{r, message = FALSE, fig.height = 6, fig.width = 12, fig.align = "center"}
+demand3 %>%
+  group_by(State) %>%
+  summarise(perc = n()*100/nrow(.)) %>%
+  arrange(desc(perc)) %>%
+  ggplot(aes(x = reorder(State, perc), y = perc)) +
+  geom_bar(aes(fill = perc), stat = 'identity', alpha = 0.8) + 
+  coord_flip() +
+  scale_y_continuous(position = 'right') +
+  labs(title = 'Percentage of requests per state') +
+  theme_classic(base_size = 16) +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line( color = "#BFBEBE"),
+        axis.ticks.y = element_line( color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"),
+        strip.background = element_blank())
+```
+
+Although Jalisco is the state with the third major number of requests, it is the second state with most clients. Lets evaluate the correlation between number of clients and demand.
+
+```{r, message = FALSE, fig.height = 6, fig.width = 12, fig.align = "center"}
+demand3 %>% group_by(State) %>%
+  summarise( clients_state = n_distinct(Cliente_ID)) %>%
+  arrange(desc(clients_state)) %>%
+  ggplot() + 
+  geom_bar(aes(x = reorder(State, clients_state), y = clients_state, fill = clients_state), stat = 'identity', alpha = 0.8) + 
+  coord_flip() +
+  labs(title = 'Number of clients per state') +
+  theme_classic(base_size = 16) +
+  theme(legend.position = "none",
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line( color = "#BFBEBE"),
+        axis.ticks.y = element_line( color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"),
+        strip.background = element_blank())
+
+```
+
+
+```{r, warning=FALSE, message = FALSE, fig.height = 6, fig.width = 12, fig.align = "center"}
+demand3 %>% group_by(State) %>%
+  summarise( clients_state = n_distinct(Cliente_ID),
+             demand = sum(Demanda_uni_equil),
+             demand_per_client = demand/clients_state) %>%
+  arrange(desc(clients_state)) %>%
+  ggplot(aes(x = clients_state, y = demand )) +
+  geom_point(aes(color = State, 
+                 size = demand_per_client), alpha = 0.5) + 
+  geom_smooth(method = 'lm', se = FALSE, 
+              color = 'grey', linetype = 'dashed', size = 0.5) + 
+  labs(x = '# clients',
+       y = 'demand') +
+  theme_classic(base_size = 16) +
+  theme(axis.title.x = element_text(color = "#555655"),
+        axis.title.y = element_text(color = "#555655"),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line( color = "#BFBEBE"),
+        axis.ticks.y = element_line( color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"),
+        strip.background = element_blank(),
+        legend.text = element_text(color = "#555655"))
+
+```
+
+It can be seen that **Nuevo Leon**, **Mexico.D.F** and **Quintana** have the best demand per client. While **Estado do México**, **Jalisco** and **México D.F** are the states with the highest number of clients.
+
+```{r, warning=FALSE, message = FALSE, fig.height = 6, fig.width = 12, fig.align = "center"}
+demand3 %>%
+  group_by(Canal_ID) %>%
+  summarise(n = n()) %>%
+  mutate(perc = n*100/sum(n)) %>%
+  arrange(desc(perc)) %>%
+  ggplot(aes(x = reorder(Canal_ID, -perc), y = perc)) +
+  geom_bar(stat = 'identity', fill = '#174A7E', alpha = 0.8) + 
+  labs(x = 'Channel',
+       y = 'percentage of requests')+
+  theme_classic(base_size = 16) +
+  theme(axis.title.x = element_text(color = "#555655"),
+        axis.title.y = element_text(color = "#555655"),
+        axis.line = element_line(size = .1, color = "#BFBEBE"),
+        axis.text = element_text(color = "#929497"),
+        axis.ticks.x = element_line( color = "#BFBEBE"),
+        axis.ticks.y = element_line( color = "#BFBEBE"),
+        plot.title = element_text(color = "#555655"),
+        strip.background = element_blank(),
+        legend.text = element_text(color = "#555655"))
+```
+The main channel  (Channel 1) used for request has 90% of the total request.
+
+```{r, include=FALSE}
+# Clean all variables and memory
+
+
+
+preprocess_product <- function(data){
+  tmp <- str_extract(data$NombreProducto, "[[:digit:]]+(g|G|kg|Kg)")
+  
+  # Weight
+  data$weight <- as.integer(str_extract(tmp, "[[:digit:]]+"))
+  data$units <- tolower(str_extract(tmp, "[[:alpha:]]+"))
+  data$weight <- ifelse(data$units == 'kg', data$weight*1000, data$weight)
+  data <- select(data, -units)
+  
+  # Pieces
+  tmp <- str_extract(data$NombreProducto, "[[:digit:]]+p\\s")
+  data$pieces <- as.integer(str_extract(tmp, "[[:digit:]]+"))
+  
+  # Volume
+  tmp <- str_extract(data$NombreProducto, "[[:digit:]]+(ml|ML)")
+  data$volume <- as.integer(str_extract(tmp, "[[:digit:]]+"))
+  
+  # Brand Name
+  tmp <- str_split(data$NombreProducto, "\\s")
+  data$brand <- sapply(tmp, function(x) x[length(x)-1])
+  
+  # Name
+  tmp <- str_split(data$NombreProducto, "\\s[[:digit:]]+")
+  data$product_name <- sapply(tmp, function(x) x[1])
+  
+  data <- data %>% select(-NombreProducto)
+  
+  data <- data %>% select(Producto_ID, product_name, brand, weight, pieces, volume)
+  
+}
+```
+
+All variables have been removed to clean memory and to start the feature engineering and model build. Lets join the table demand with products after treating the data in order to combine the two datasets into a single one to be used on feature engineering.
+
+```{r, message=FALSE}
+data <- read_csv('data/train.csv')
+data <- data %>% select(-c(Venta_uni_hoy, Venta_hoy, Dev_uni_proxima, Dev_proxima))
+
+town <- read_csv('data/town_state.csv')
+town <- town %>% mutate(Town = as.numeric(as_factor(Town)),
+                State = as.numeric(as_factor(State)))
+data <- left_join(data, town, by = 'Agencia_ID')
+
+product <- read_csv('data/producto_tabla.csv') 
+product <- preprocess_product(product)
+product <- product %>% mutate(brand = as.numeric(as_factor(brand)))
+data <- left_join(data, product, by = 'Producto_ID')
+data <- data %>% mutate(product_name = as.numeric(as_factor(product_name)))
+
+rm(product, town)
+
+paged_table(data)
+```
+
+# 4- Feature Engineering
+
+
+In order to make the feature engineering we will select the target week and append variables related to previous week demands. Overall behaviours, and 1, 2 and 3 week lags will be measured.
+The following variables are created considering the Demand_uni_equil variable:
+
+**1 Week Lag**
+
+* Median grouped by Client;
+* Median grouped by product;
+* Median grouped by Agency, Product and Route;
+* Number of occurrences by Agency, Product and Route;
+* Median grouped by Client, Product and Route;
+* Number of occurrences by Client, Product and Route;
+
+**2 and 3 Week Lag**
+
+* Median grouped by Client;
+* Median grouped by product;
+* Median, minimum and maximum grouped by Agency, Product and Route;
+* Number of occurrences by Agency, Product and Route;
+* Median, minimum and maximum grouped by Client, Product and Route;
+* Number of occurrences by Client, Product and Route.
+
+
+**Overall**
+
+* Mean grouped by Client, Product and Route;
+* Median grouped by product;
+* Median grouped by client.
+
+
+```{r feature_engineering}
+
+feature_engineering <- function(df, week_dataset,  pred_week){
+  
+  lag1 <- pred_week-1
+  lag2 <- pred_week-2
+  lag3 <- pred_week-3
+  
+  # --------------------    Build data frames   --------------------------------
+  
+  lag1_df <- df %>% filter(Semana == lag1)
+  lag23_df <- df %>% filter(Semana %in% c(lag2, lag3))
+  
+  
+  # 1 Week Lag --------------------------------------------------------------
+  
+  # 1 Variable -------------------------------------------------------------
+  
+  
+  lag1_Cliente <- lag1_df %>%  group_by(Cliente_ID) %>% 
+    summarise(ClienteLag1 = median(Demanda_uni_equil),
+              n_ClienteLag1 = n(),
+              extreme_Client_lag1 =  boxplot.stats(Demanda_uni_equil)$stats[5])
+  
+  lag1_Producto <- lag1_df %>%  group_by(Producto_ID) %>% 
+    summarise(ClienteLag1 = median(Demanda_uni_equil),
+              n_ProductoLag1 = n(),
+              extreme_Product_lag1 =  boxplot.stats(Demanda_uni_equil)$stats[5])
+  
+  
+  week_dataset_final <- week_dataset %>% left_join(lag1_Cliente, by = 'Cliente_ID')
+  week_dataset_final <- week_dataset_final %>% left_join(lag1_Producto, by = 'Producto_ID')
+  
+  rm(lag1_Cliente, lag1_Producto)
+  
+  
+  # 3 variables
+  # Agencia Ruta Product
+  lag1_Agencia_Product_Ruta <- lag1_df %>% group_by(Agencia_ID, Producto_ID, Ruta_SAK) %>%
+    summarise(lag1AgenciaProductRuta = median(Demanda_uni_equil),
+              n_agencia_product_ruta = n())
+  week_dataset_final <- week_dataset_final %>% left_join(lag1_Agencia_Product_Ruta, by = c('Agencia_ID', 'Producto_ID', 'Ruta_SAK'))
+  rm(lag1_Agencia_Product_Ruta)
+  
+  # Cliente Producto Ruta
+  lag1_Cliente_Product_Ruta <- lag1_df %>% group_by(Cliente_ID, Producto_ID, Ruta_SAK) %>%
+    summarise(lag1ClienteProductRuta = mean(Demanda_uni_equil),
+              n_cliente_product_ruta = n())
+  
+  week_dataset_final <- week_dataset_final %>% left_join(lag1_Cliente_Product_Ruta, by = c('Cliente_ID', 'Producto_ID', 'Ruta_SAK'))
+  rm(lag1_Cliente_Product_Ruta)
+  
+  
+  # 2 and 3 Week Lag --------------------------------------------------------
+  # 1 variable
+  
+  lag23_Cliente <- lag23_df %>%  group_by(Cliente_ID) %>% 
+    summarise(Clientelag23 = median(Demanda_uni_equil),
+              n_Clientelag23 = n(),
+              extreme_Client_lag23 =  boxplot.stats(Demanda_uni_equil)$stats[5])
+  
+  lag23_Producto <- lag23_df %>%  group_by(Producto_ID) %>% 
+    summarise(Clientelag23 = median(Demanda_uni_equil),
+              n_Productolag23 = n(),
+              extreme_Product_lag23 =  boxplot.stats(Demanda_uni_equil)$stats[5])
+  
+  
+  week_dataset_final <- week_dataset_final %>% left_join(lag23_Cliente, by = 'Cliente_ID')
+  week_dataset_final <- week_dataset_final %>% left_join(lag23_Producto, by = 'Producto_ID')
+  
+  rm(lag23_Cliente, lag23_Producto)
+  
+  # 3 variables
+  
+  # Agencia Producto Ruta
+  lag23_Agencia_Producto_Ruta <- lag23_df %>% group_by(Agencia_ID, Producto_ID, Ruta_SAK) %>%
+    summarise(mean_lag23AgenciaProductoRuta = median(Demanda_uni_equil), 
+              min_lag23AgenciaProductoRuta = min(Demanda_uni_equil), 
+              max_lag23AgenciaProductoRuta = max(Demanda_uni_equil),
+              n_lag23AgenciaProductoRuta = n())
+  
+  week_dataset_final <- week_dataset_final %>% left_join(lag23_Agencia_Producto_Ruta, by = c('Agencia_ID', 'Producto_ID', 'Ruta_SAK'))
+  rm(lag23_Agencia_Producto_Ruta)
+  
+  # Cliente Product Ruta
+  lag23_Cliente_Product_Ruta <- lag23_df %>% group_by(Cliente_ID, Producto_ID, Ruta_SAK) %>%
+    summarise(mean_lag23ClienteProductRuta = median(Demanda_uni_equil), 
+              min_lag23ClienteProductRuta = min(Demanda_uni_equil), 
+              max_lag23ClienteProductRuta = max(Demanda_uni_equil),
+              n_lag23ClienteProductRuta = n())
+  
+  week_dataset_final <- week_dataset_final %>% left_join(lag23_Cliente_Product_Ruta, by = c('Cliente_ID', 'Producto_ID', 'Ruta_SAK'))
+  rm(lag23_Cliente_Product_Ruta)
+  
+  # Overall
+  
+  client_produt_all <- df %>% filter(Semana %in% seq(min(df$Semana), pred_week-1)) %>%
+    group_by(Cliente_ID, Producto_ID, Ruta_SAK) %>%
+    summarise(min_all_Client_Product = min(Demanda_uni_equil),
+              max_all_Client_Product = max(Demanda_uni_equil),
+              mean_all_Client_Product = mean(Demanda_uni_equil),
+              n_all_Client_Product = n())
+  
+  week_dataset_final <- week_dataset_final %>% left_join(client_produt_all, by = c('Cliente_ID', 'Producto_ID', 'Ruta_SAK'))
+  rm(client_produt_all)
+  
+  produt_all <- df %>% filter(Semana %in% seq(min(df$Semana), pred_week-1)) %>%
+    group_by(Producto_ID) %>%
+    summarise(min_all_Product = min(Demanda_uni_equil),
+              max_all_Product = max(Demanda_uni_equil),
+              mean_all_Product = median(Demanda_uni_equil),
+              n_all_Product = n())
+  
+  week_dataset_final <- week_dataset_final %>% left_join(produt_all, by = c( 'Producto_ID'))
+  rm(produt_all)
+  
+  client_all <- df %>% filter(Semana %in% seq(min(df$Semana), pred_week-1)) %>%
+    group_by(Cliente_ID) %>%
+    summarise(min_all_Client = min(Demanda_uni_equil),
+              max_all_Client = max(Demanda_uni_equil),
+              mean_all_Client = median(Demanda_uni_equil),
+              n_all_Client = n())
+  
+  week_dataset_final <- week_dataset_final %>% left_join(client_all, by = c( 'Cliente_ID'))
+  rm(client_all)
+  
+  week_dataset_final <- week_dataset_final %>% 
+    mutate(tagClientelag1 = ifelse(lag1ClienteProductRuta > extreme_Client_lag1, 1, 0),
+           tagProductlag1 = ifelse(lag1ClienteProductRuta > extreme_Product_lag1, 1, 0),
+           tagClientelag23 = ifelse(mean_lag23ClienteProductRuta > extreme_Client_lag23, 1, 0),
+           tagProductlag23 = ifelse(mean_lag23ClienteProductRuta > extreme_Product_lag23, 1, 0),
+           tagAllProduct = ifelse(mean_all_Client_Product > mean_all_Product, 1, 0))
+  
+  return(week_dataset_final)
+  
+}
+
+
+```
+
+We will be using week 7 to train, 8 to validate and week 9 to test.
+Lets prepare dataset to train based on week 7.
+
+```{r fe_train, message=FALSE, cache=TRUE, eval = FALSE}
+pred_week <- 7
+
+train_data <- data %>% 
+  filter(Semana == pred_week) %>% 
+  select(-Demanda_uni_equil)
+
+train_label <- data %>% 
+  filter(Semana == pred_week) %>% 
+  select(Demanda_uni_equil)
+
+trainDataFE <- feature_engineering(data, train_data, pred_week)
+
+```
+```{r, include=FALSE}
+trainDataFE <- readRDS(file = 'D:/FCD/01BigDataAzure/Projeto2/objects/traindatafe.rds')
+```
+
+```{r}
+dim(trainDataFE)
+```
+
+We have 10,382,849 rows and 54 variables after the feature engineering
+
+```{r}
+paged_table(trainDataFE)
+```
+
+```{r, include=FALSE}
+rm(train_data, week_client, client653378, trainDataFE)
+gc()
+```
+
+
+We will also perform the feature engineering on validation dataset in order to be used in model tuning.
+
+```{r fe_vali, message=FALSE, cache=TRUE, eval = FALSE}
+pred_week_vali <- 8
+
+vali_data <- data %>% 
+  filter(Semana == pred_week_vali) %>% 
+  select(-Demanda_uni_equil)
+
+vali_label <- data %>% 
+  filter(Semana == pred_week_vali) %>% 
+  select(Demanda_uni_equil)
+
+valiDataFE <- feature_engineering(data, vali_data, pred_week_vali)
+
+```
+
+
+```{r, include = FALSE, eval = FALSE}
+
+saveRDS(trainDataFE, file = 'D:/FCD/01BigDataAzure/Projeto2/objects/traindatafe.rds')
+saveRDS(valiDataFE, file = 'D:/FCD/01BigDataAzure/Projeto2/objects/validatafe.rds')
+saveRDS(train_label, file = 'D:/FCD/01BigDataAzure/Projeto2/objects/train_label.rds')
+saveRDS(vali_label, file = 'D:/FCD/01BigDataAzure/Projeto2/objects/vali_label.rds')
+
+setwd("D:/FCD/01BigDataAzure/Projeto2")
+
+```
+
+
+# 5- Models Selection
+
+The following models will be tested:
+
+* Multi-linear regression;
+* XGBoost;
+
+## 5.1 - Multi-Linear Regression
+
+### 5.1.1 - Scale and center train datasets
+
+We will need to select numerical variables to the model. Some of the variables although they are as numeric they represent nominal categories, reason why the order doesn't represent a real sequence. An option to use the categorical variables would be to make a one hot encoded, but unfortunaly there are thousand of possibilities per variable.
+
+```{r, eval = FALSE}
+train_FE_SC <- trainDataFE %>%
+  select(-c(Semana, Agencia_ID, Canal_ID, Ruta_SAK, Cliente_ID, 
+            Producto_ID, Town, State, product_name, brand))
+```
+
+The linear regression cannot handle NA values, so they will be replace by zero and then scaled and centered.
+
+```{r, eval = FALSE}
+# Replace NA values by 0
+train_FE_SC[is.na(train_FE_SC)] <- 0
+
+# Train model to center and scale data
+preProcValues <- preProcess(train_FE_SC, method= c('center', 'scale'))
+
+trainDataFE_SC <- predict(preProcValues, train_FE_SC)
+
+rm(train_FE_SC)
+
+# Bind data with label
+train_scaled <- cbind(trainDataFE_SC, train_label)
+
+rm(trainDataFE_SC)
+```
+
+
+We need to make the same process to the validation data.
+```{r, eval=FALSE}
+vali_FE_SC <- valiDataFE %>%
+  select(-c(Semana, Agencia_ID, Canal_ID, Ruta_SAK, Cliente_ID, 
+            Producto_ID, Town, State, product_name, brand))
+
+vali_FE_SC[is.na(vali_FE_SC)] <- 0
+
+valiDataFE_SC <- predict(preProcValues, vali_FE_SC)
+
+rm(vali_FE_SC)
+
+vali_scaled <- cbind(valiDataFE_SC, vali_label)
+
+rm(valiDataFE_SC)
+```
+
+
+```{r, include=FALSE, eval = FALSE}
+saveRDS(train_scaled, file = 'D:/FCD/01BigDataAzure/Projeto2/objects/trainscaled.rds')
+saveRDS(vali_scaled, file = 'D:/FCD/01BigDataAzure/Projeto2/objects/valiscaled.rds')
+saveRDS(preProcValues, file ='D:/FCD/01BigDataAzure/Projeto2/models/scaledata.rds')
+saveRDS(feature_engineering, file = 'D:/FCD/01BigDataAzure/Projeto2/models/feature.rds')
+
+```
+```{r, include=FALSE}
+setwd("D:/FCD/01BigDataAzure/Projeto2")
+```
+```{r, include=FALSE}
+preProcValues <- readRDS(file ='D:/FCD/01BigDataAzure/Projeto2/models/scaledata.rds')
+```
+
+
+### 5.1.2 - Train model
+
+We will first train a convetional multi-linear regression model.
+
+```{r, include=FALSE}
+rm(valiDataFE, trainDataFE, trainDataFE_SC, train_data, vali_data)
+
+```
+
+```{r, include=FALSE}
+train_scaled <- readRDS(file = 'D:/FCD/01BigDataAzure/Projeto2/objects/trainscaled.rds')
+```
+
+```{r}
+regress <- lm(Demanda_uni_equil ~.,
+                 data = train_scaled)
+
+lm_fit <- predict(regress, train_scaled %>% select(-Demanda_uni_equil))
+
+```
+
+Lets take a look on the predictive values range.
+
+```{r}
+summary(lm_fit)
+```
+
+Because the minimum value is below zero, the predicted demand should be corrected in order to ensure that the minimum possible value is zero.
+
+Lets compare the train and validation score.
+
+```{r, include = FALSE}
+train_label <- readRDS(file = 'D:/FCD/01BigDataAzure/Projeto2/objects/train_label.rds')
+vali_label <- readRDS(file = 'D:/FCD/01BigDataAzure/Projeto2/objects/vali_label.rds')
+vali_scaled <- readRDS(file = 'D:/FCD/01BigDataAzure/Projeto2/objects/valiscaled.rds')
+```
+
+```{r}
+# Train pedrictions
+lm_fit <- ifelse(lm_fit <0, 0, lm_fit)
+
+
+#Validation prediction
+
+vali_fit <- predict(regress, vali_scaled %>% select(-Demanda_uni_equil))
+
+vali_fit <- ifelse(vali_fit <0, 0, vali_fit)
+
+# Train and Validations Scores
+
+score_vali_linear <- rmsle(vali_label$Demanda_uni_equil, vali_fit)
+score_train_linear <- rmsle(train_label$Demanda_uni_equil, lm_fit)
+
+
+scores_linear <- data.frame('Train_Linear' = round(score_train_linear, 4),
+                 'Validation_Linear' = round(score_vali_linear, 4))
+
+paged_table(scores_linear)
+```
+
+
+The validation score is 0.64 while the train score is 0.53. This results can be responsible for a overfitting. The models is not able to generalize to new data.
+
+In order to avoid overfitting we can use cross-validation and regularization (L1 or L2 for example). Lets use caret library to do it.
+
+
+```{r, include=FALSE}
+rm(regress)
+
+train_scaled <- readRDS(file = 'D:/FCD/01BigDataAzure/Projeto2/objects/trainscaled.rds')
+vali_scaled <- readRDS(file = 'D:/FCD/01BigDataAzure/Projeto2/objects/valiscaled.rds')
+
+```
+
+Lets use a cross-validation with 5 splits and compare compare lasso and ridge regularization methods.
+
+
+## 5.2 Ridge Regression
+
+A common and very challenging problem in machine learning is overfitting, and it comes in many different appearances. It is one of the major aspects of training the model. Overfitting occurs when the model is capturing too much noise in the training data set which leads to bad predication accuracy when applying the model to new data. One of the ways to avoid overfitting is regularization technique.
+
+One of the main problems in the construction of such models is the correct selection of the regularization parameter. Comparing to linear regression, Ridge and Lasso models are more resistant to outliers and the spread of data. Overall, their main purpose is to prevent overfitting.
+
+The main difference between Ridge regression and Lasso is how they assign a penalty to the coefficients. 
+
+The lambda regularization parameter is one of the parameters that should optimized. In order to do that we can use tuneLength or Tunegrid.
+
+
+```{r}
+library(doParallel)
+cl <- makePSOCKcluster(11)
+registerDoParallel(cl)
+```
+
+```{r}
+lambda <- 10^seq(-3, 3, length = 50)
+
+tc <- trainControl(method = "cv", number = 5, trim = TRUE)
+
+model_ridge <- caret::train(Demanda_uni_equil ~.,
+                    data = train_scaled,
+                    method = 'glmnet',
+                    trControl = tc,
+                    tuneGrid = expand.grid(alpha = 0, lambda = lambda)
+                    )
+```
+
+
+```{r}
+# Model coefficients
+coef(model_ridge$finalModel, model_ridge$bestTune$lambda)
+```
+
+
+
+```{r, Ridge Prediction and Score, cache = TRUE}
+# Make predictions
+pred_train_ridge <- predict(model_ridge)
+pred_train_ridge <- ifelse(pred_train_ridge <0, 0, pred_train_ridge)
+
+pred_vali_ridge <- model_ridge %>% predict(vali_scaled)
+pred_vali_ridge <- ifelse(pred_vali_ridge <0, 0, pred_vali_ridge)
+
+# Get scores
+score_train_ridge <- rmsle(train_label$Demanda_uni_equil, pred_train_ridge)
+score_vali_ridge <- rmsle(vali_label$Demanda_uni_equil, pred_vali_ridge)
+
+scores_ridge <- data.frame('Train_Ridge' = round(score_train_ridge, 4),
+                 'Validation_Ridge' = round(score_vali_ridge, 4))
+
+paged_table(scores_ridge)
+```
+
+
+It can be seen that the train and validation scores are similar, reason why we can conclude that the overfitting was corrected.
+
+
+```{r, include=FALSE, warning=FALSE}
+rm(vali_data, train_data, model_ridge, lm_fit, vali_fit)
+```
+
+
+## 5.3 - Lasso Regression
+
+Lets train a lasso regression in order to compare with the ridge
+
+```{r, Lasso regression, warning=FALSE, cache = TRUE}
+tc <- trainControl(method = "cv", number = 5, trim = TRUE)
+
+model_lasso <- caret::train(Demanda_uni_equil ~.,
+                    data = train_scaled,
+                    method = 'glmnet',
+                    trControl = tc,
+                    tuneGrid = expand.grid(alpha = 1, lambda = lambda)
+                    )
+```
+Lets compare the train and validation score using lasso
+
+```{r}
+pred_train_lasso <- predict(model_lasso)
+pred_train_lasso <- ifelse(pred_train_lasso <0, 0, pred_train_lasso)
+
+pred_vali_lasso <- model_lasso %>% predict(vali_scaled)
+pred_vali_lasso <- ifelse(pred_vali_lasso <0, 0, pred_vali_lasso)
+
+# Get scores
+score_train_lasso <- rmsle(train_label$Demanda_uni_equil, pred_train_lasso)
+score_vali_lasso <- rmsle(vali_label$Demanda_uni_equil, pred_vali_lasso)
+
+scores_lasso <- data.frame('Train_Lasso' = round(score_train_lasso, 4),
+                 'Validation_Lasso' = round(score_vali_lasso, 4))
+
+paged_table(scores_lasso)
+```
+
+```{r, include=FALSE}
+rm(model_lasso, valiDataFE, trainDataFE)
+
+```
+
+## 5.4 - XGBoost
+```{r}
+xgboostgrid <- expand.grid( max.depth = c( 10, 11, 12, 13, 14, 16),
+                              eta = c(0.05, 0.1, 0.15, 0.2, 0.25, 0.3), 
+                              nrounds = c(70, 80, 90, 100, 110, 120, 130, 140),
+                            objective = 'reg:squaredlogerror')
+
+paged_table(xgboostgrid)
+```
+
+
+```{r}
+dtrain <- xgb.DMatrix(data = as.matrix(train_scaled %>% select(-Demanda_uni_equil)) , 
+                        label = train_label$Demanda_uni_equil)
+```
+
+
+```{r XGBoost train, eval = FALSE}
+
+score_list = c()
+
+for (row in 1:nrow(xgboostgrid)){
+  
+  #print(paste(as.character(row), '/',  as.character(nrow(xgboostgrid))))
+  
+  n  = xgboostgrid[row,]
+  
+  bstDense <- xgboost(data = dtrain,
+                      max.depth = n$max.depth, 
+                      eta = n$eta,
+                      nrounds = n$nrounds,
+                      objective = n$objective,
+                      eval_metric = 'rmsle',
+                      tree_method = 'gpu_hist',
+                      verbose = 0)
+  
+  vali_predi <- predict(bstDense, newdata =  as.matrix(vali_scaled %>% 
+                                                         select(- Demanda_uni_equil)))
+  vali_predi <- ifelse(vali_predi <0, 0, vali_predi)
+
+  # Get scores
+  score_vali_xgboost <- rmsle(vali_label$Demanda_uni_equil, vali_predi)
+   
+  #print(round(score_vali_xgboost, 4))
+  score_list <- c(score_list, score_vali_xgboost)
+  
+  rm(bstDense)
+  
+}
+
+```
+
+
+```{r, eval = FALSE }
+grid_score <- xgboostgrid %>% mutate(rmsle = score_list)
+grid_score %>% arrange(rmsle) %>% head()
+
+write_csv(grid_score, file = 'D:/FCD/01BigDataAzure/Projeto2/models/grid_score.csv')
+```
+
+```{r echo=FALSE}
+grid_score <- read_csv(file = 'D:/FCD/01BigDataAzure/Projeto2/models/grid_score.csv')
+paged_table(grid_score %>% arrange(rmsle) %>% head())
+```
+
+
+## 5.5 - XGBoost Tuned
+
+The best model (minimum RSMLE with validation data) was achieved with:
+
+* **max.depth** = 14
+* **eta** = 0.1
+* **nrounds** = 140
+
+
+```{r xgboost opt, eval = FALSE}
+# Optimized model
+ xgboost_opt <- xgboost(data = dtrain,
+                      max.depth = 14, 
+                      eta = 0.1,
+                      nrounds = 140,
+                      objective = 'reg:squaredlogerror',
+                      eval_metric = 'rmsle',
+                      tree_method = 'gpu_hist',
+                      verbose = 0)
+```
+
+
+```{r, eval = FALSE, include = FALSE}
+saveRDS(xgboost_opt, file = 'D:/FCD/01BigDataAzure/Projeto2/models/xgboost.rds')
+```
+
+```{r, include=FALSE}
+xgboost_opt <- readRDS(file = 'D:/FCD/01BigDataAzure/Projeto2/models/xgboost.rds')
+```
+
+
+```{r}
+# Pred Train
+pred_xgboost_train <- predict(xgboost_opt, 
+                              newdata =  as.matrix(train_scaled %>% select(-Demanda_uni_equil)))
+pred_xgboost_train <- ifelse(pred_xgboost_train < 0, 0, pred_xgboost_train)
+
+# Pred Validation
+pred_xgboost_vali <- predict(xgboost_opt, 
+                             newdata =  as.matrix(vali_scaled %>% select(-Demanda_uni_equil)))
+pred_xgboost_vali <- ifelse(pred_xgboost_vali <0, 0, pred_xgboost_vali)
+
+# Get Scores
+score_train_xgboost <- rmsle(train_label$Demanda_uni_equil, pred_xgboost_train)
+score_vali_xgboost <- rmsle(vali_label$Demanda_uni_equil, pred_xgboost_vali)
+
+scores_xgboost <- data.frame('Train_XGBoost' = round(score_train_xgboost, 4),
+                 'Validation_XGBoost' = round(score_vali_xgboost, 4))
+
+paged_table(scores_xgboost)
+```
+
+
+Lets see use the 9 week has test, perform the feature engineering and use the XGboost model to predict the demand and compute de final score.
+
+```{r test scaled, cache=TRUE}
+pred_week_test <- 9
+
+test_data <- data %>% 
+  filter(Semana == pred_week_test) %>% 
+  select(-Demanda_uni_equil)
+
+test_label <- data %>% 
+  filter(Semana == pred_week_test) %>% 
+  select(Demanda_uni_equil)
+
+testDataFE <- feature_engineering(data, test_data, pred_week_test)
+
+test_FE_SC <- testDataFE %>%
+  select(-c(Semana, Agencia_ID, Canal_ID, Ruta_SAK, Cliente_ID, 
+            Producto_ID, Town, State, product_name, brand))
+
+test_FE_SC[is.na(test_FE_SC)] <- 0
+
+test_FE_SC <- predict(preProcValues, test_FE_SC)
+
+
+test_scaled <- as.data.frame(cbind(test_FE_SC, test_label))
+
+rm(test_FE_SC)
+
+```
+
+
+```{r}
+# Pred Test
+pred_xgboost_test <- predict(xgboost_opt, 
+                             newdata =  as.matrix(test_scaled %>% select(-Demanda_uni_equil)))
+pred_xgboost_test <- ifelse(pred_xgboost_test <0, 0, pred_xgboost_test)
+
+# Get Test Score
+score_test_xgboost <- rmsle(test_label$Demanda_uni_equil, pred_xgboost_test)
+
+scores_xgboost2 <- data.frame('Train_XGBoost' = round(score_train_xgboost, 4),
+                 'Validation_XGBoost' = round(score_vali_xgboost, 4),
+                 'Test_XGBoost' = round(score_test_xgboost, 4))
+
+paged_table(scores_xgboost2)
+```
+
+```{r, include=FALSE}
+rm(vali_scaled2, vali_scaled, testDataFE, model_lasso, train_scaled2, test_scaled, vali_scaled, train_scaledtest_data, teste, vali_df, pred_vali_lasso, pred_train_combine)
+```
+
+We can see hat the test data has week 10 and 11. We will first predict week 10, add to the data and then  predict week 11.
+
+# Predict demand for week 10 and 11
+
+```{r import test dta}
+final_data  <- read_csv('data/test.csv')
+
+town <- read_csv('data/town_state.csv')
+town <- town %>% mutate(Town = as.numeric(as_factor(Town)),
+                State = as.numeric(as_factor(State)))
+final_data  <- left_join(final_data , town, by = 'Agencia_ID')
+
+product <- read_csv('data/producto_tabla.csv') 
+product <- preprocess_product(product)
+product <- product %>% mutate(brand = as.numeric(as_factor(brand)))
+final_data  <- left_join(final_data , product, by = 'Producto_ID')
+final_data  <- final_data  %>% mutate(product_name = as.numeric(as_factor(product_name)))
+
+paged_table(final_data )
+```
+
+```{r, include=FALSE}
+rm(product, town)
+gc()
+```
+
+```{r}
+summary(final_data$Semana)
+```
+
+
+Lets split the data into week 10 and 11 and see if no rows were missed.
+```{r separate data}
+week10 <- final_data %>% filter(Semana == 10) %>% select(-id)
+week10_id <- final_data %>% filter(Semana == 10) %>% select(id)
+week11 <- final_data %>% filter(Semana == 11) %>% select(-id)
+week11_id <- final_data %>% filter(Semana == 11) %>% select(id)
+
+nrow(week10) + nrow(week11) == nrow(final_data )
+
+```
+Feature Engineering, center and scale
+```{r week10}
+pred_week10 <- 10
+
+week10DataFE <- feature_engineering(data, week10, pred_week10)
+
+```
+
+```{r week 10 sc}
+week10DataFE_SC <- week10DataFE %>%
+  select(-c(Semana, Agencia_ID, Canal_ID, Ruta_SAK, Cliente_ID, 
+            Producto_ID, Town, State, product_name, brand))
+
+week10DataFE_SC[is.na(week10DataFE_SC)] <- 0
+
+week10DataFE_SC <- predict(preProcValues, week10DataFE_SC)
+```
+
+
+```{r, include=FALSE}
+rm(week10DataFE)
+gc()
+```
+
+
+Make the predictions for week 10
+```{r pred week 10}
+# Pred Test
+pred_week10 <- predict(xgboost_opt, 
+                             newdata =  as.matrix(week10DataFE_SC))
+pred_week10 <- ifelse(pred_week10 <0, 0, pred_week10)
+
+```
+
+
+```{r}
+# Combine predictions with original data
+
+week10_final <- week10 %>% mutate(Demanda_uni_equil = pred_week10)
+
+data_10 <- rbind(data, week10_final)
+```
+
+```{r, include = FALSE}
+rm(week10DataFE_SC, data)
+gc()
+```
+
+
+Make Feature Engineering, center and scale for week 11.
+
+```{r week11}
+pred_week11 <- 11
+
+week11DataFE <- feature_engineering(data_10, week11, pred_week11)
+```
+
+```{r week 11 sc}
+week11DataFE_SC <- week11DataFE %>%
+  select(-c(Semana, Agencia_ID, Canal_ID, Ruta_SAK, Cliente_ID, 
+            Producto_ID, Town, State, product_name, brand))
+
+week11DataFE_SC[is.na(week11DataFE_SC)] <- 0
+
+week11DataFE_SC <- predict(preProcValues, week11DataFE_SC)
+```
+
+
+```{r}
+rm(week11DataFE)
+gc()
+```
+
+
+```{r pred week 11}
+# Pred Test
+pred_week11 <- predict(xgboost_opt, 
+                             newdata =  as.matrix(week11DataFE_SC))
+pred_week11 <- ifelse(pred_week11 <0, 0, pred_week11)
+
+```
+
+```{r, include=FALSE}
+rm(week11DataFE_SC)
+gc()
+```
+
+
+```{r join data}
+week10_id <- week10_id %>% mutate(Demanda_uni_equil = pred_week10)
+week11_id <- week11_id %>% mutate(Demanda_uni_equil = pred_week11)
+
+final_pred <- rbind(week10_id, week11_id)
+final_pred <- final_pred %>% arrange(id)
+
+write_csv(final_pred, file = 'D:/FCD/01BigDataAzure/Projeto2/data/new/pred.csv')
+
+```
+
+
+**Private score**: 0.48655
+**Public score**: 0.44770
